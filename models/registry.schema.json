@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://playdub.app/schemas/model-registry-v1.json",
+  "title": "Playdub model registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "models"],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/model"
+      }
+    }
+  },
+  "$defs": {
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "kind",
+        "upstream",
+        "revision",
+        "license",
+        "licenseUrl",
+        "modelCardUrl",
+        "languages",
+        "distribution",
+        "files",
+        "review"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]+$"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": ["vad", "asr", "translation", "punctuation", "language-id"]
+        },
+        "upstream": {
+          "type": "string",
+          "format": "uri"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 7
+        },
+        "license": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tokenizerLicense": {
+          "type": "string"
+        },
+        "licenseUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "modelCardUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "languages": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-[A-Z]{2})?$"
+          }
+        },
+        "distribution": {
+          "enum": ["upstream-download", "project-mirror", "user-supplied"]
+        },
+        "restrictions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "url", "size", "sha256"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[^/\\\\]+$"
+              },
+              "url": {
+                "type": "string",
+                "format": "uri"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          }
+        },
+        "review": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reviewedAt", "reviewedBy", "evidenceIssue"],
+          "properties": {
+            "reviewedAt": {
+              "type": "string",
+              "format": "date"
+            },
+            "reviewedBy": {
+              "type": "string",
+              "minLength": 1
+            },
+            "evidenceIssue": {
+              "type": "string",
+              "format": "uri"
+            }
+          }
+        }
+      }
+    }
+  }
+}

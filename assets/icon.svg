@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>Playdub application icon</title>
+  <rect width="512" height="512" rx="112" fill="#08090b"/>
+  <path d="M205 151c-17-10-38 2-38 22v166c0 20 21 32 38 22l143-83c17-10 17-34 0-44z" fill="#c8ff56"/>
+  <rect x="104" y="398" width="304" height="18" rx="9" fill="#fff" opacity=".88"/>
+  <rect x="152" y="438" width="208" height="14" rx="7" fill="#fff" opacity=".42"/>
+</svg>

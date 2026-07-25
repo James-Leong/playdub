@@ -1,0 +1,30 @@
+# Frontend
+node_modules/
+dist/
+coverage/
+
+# Rust / Tauri
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# Local environment
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+*.log
+
+# Editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Local models and generated media
+models/downloads/
+models/cache/
+*.srt
+*.vtt
+*.ass

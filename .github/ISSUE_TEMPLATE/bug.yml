@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a reproducible Playdub problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include private media, transcripts, file paths, credentials, or security vulnerabilities.
+        Report vulnerabilities through the process in SECURITY.md.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS Apple Silicon
+        - macOS Intel
+        - Windows x64
+        - Linux x64
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Playdub version or commit
+      placeholder: v0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open…
+        2. Select…
+        3. Observe…
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Relevant environment
+      description: CPU/GPU, OS version, media container/codecs, and model ID. Sanitize private paths.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Remove private paths, media names, transcript text, and secrets.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed private data and this is not a security report.
+          required: true
