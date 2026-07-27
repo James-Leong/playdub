@@ -1,3 +1,4 @@
+import type Hls from "hls.js";
 import {
   type ChangeEvent,
   type DragEvent,
@@ -10,14 +11,12 @@ import {
 import {
   analyzeVideo,
   authorizeMediaPath,
-  chooseExecutable,
-  chooseModel,
   chooseVideo,
   exportSubtitles,
   isDesktopRuntime,
-  mediaSourceFromPath,
+  prepareCompatiblePlayback,
   type SubtitleSegment,
-  subscribeAnalysisProgress,
+  subscribeAnalysisSegments,
 } from "./lib/playdub";
 import { getRuntimeInfo, type RuntimeInfo } from "./lib/runtime";
 import { DEFAULT_SETTINGS, loadSettings, type PlaydubSettings, saveSettings } from "./lib/settings";
@@ -31,6 +30,7 @@ interface MediaSelection {
   source: string;
   canAnalyze: boolean;
   objectUrl?: string;
+  streamKind?: "hls";
 }
 
 interface IconProps {
@@ -45,9 +45,6 @@ const LANGUAGES = [
   { value: "zh", label: "简体中文" },
   { value: "ja", label: "日本語" },
   { value: "ko", label: "한국어" },
-  { value: "es", label: "Español" },
-  { value: "fr", label: "Français" },
-  { value: "de", label: "Deutsch" },
 ];
 
 function Icon({ children, className, viewBox = "0 0 24 24" }: IconProps) {
@@ -141,6 +138,8 @@ export function App() {
   const browserInputRef = useRef<HTMLInputElement>(null);
   const settingsCloseRef = useRef<HTMLButtonElement>(null);
   const generationRef = useRef(0);
+  const playbackFallbackRef = useRef<string | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
 
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [media, setMedia] = useState<MediaSelection | null>(null);
@@ -152,10 +151,9 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [segments, setSegments] = useState<SubtitleSegment[]>([]);
   const [analysisState, setAnalysisState] = useState<AnalysisState>("idle");
-  const [analysisStage, setAnalysisStage] = useState("Ready to translate");
-  const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const [playbackMessage, setPlaybackMessage] = useState<string | null>(null);
 
   const activeSegment = useMemo(
     () => findActiveSegment(segments, currentTime),
@@ -191,21 +189,20 @@ export function App() {
 
   useEffect(() => {
     let disposed = false;
-    let stopListening: (() => void) | undefined;
+    let stopListeningSegments: (() => void) | undefined;
 
     if (isDesktopRuntime()) {
-      subscribeAnalysisProgress((event) => {
+      subscribeAnalysisSegments((event) => {
         if (event.generationId !== generationRef.current) {
           return;
         }
-        setProgress(Math.max(0, Math.min(1, event.progress)));
-        setAnalysisStage(event.message || event.stage);
+        setSegments((current) => normalizeSegments([...current, ...event.segments]));
       })
         .then((unlisten) => {
           if (disposed) {
             unlisten();
           } else {
-            stopListening = unlisten;
+            stopListeningSegments = unlisten;
           }
         })
         .catch(() => undefined);
@@ -213,7 +210,7 @@ export function App() {
 
     return () => {
       disposed = true;
-      stopListening?.();
+      stopListeningSegments?.();
     };
   }, []);
 
@@ -226,17 +223,88 @@ export function App() {
     [media],
   );
 
+  useEffect(() => {
+    const video = videoRef.current;
+    hlsRef.current?.destroy();
+    hlsRef.current = null;
+    if (!video || media?.streamKind !== "hls") {
+      return;
+    }
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = media.source;
+      return;
+    }
+    let disposed = false;
+    void import("hls.js").then(({ default: HlsPlayer }) => {
+      if (disposed) {
+        return;
+      }
+      if (!HlsPlayer.isSupported()) {
+        setError("This video cannot be streamed by the system player.");
+        return;
+      }
+      const hls = new HlsPlayer({ enableWorker: true });
+      hlsRef.current = hls;
+      hls.loadSource(media.source);
+      hls.attachMedia(video);
+      hls.on(HlsPlayer.Events.ERROR, (_event, data) => {
+        if (data.fatal) {
+          setError("The local compatibility stream stopped unexpectedly.");
+        }
+      });
+    });
+    return () => {
+      disposed = true;
+      hlsRef.current?.destroy();
+      hlsRef.current = null;
+    };
+  }, [media?.source, media?.streamKind]);
+
   function loadMedia(nextMedia: MediaSelection) {
     generationRef.current += 1;
+    playbackFallbackRef.current = null;
     setMedia(nextMedia);
     setSegments([]);
     setAnalysisState("idle");
-    setAnalysisStage("Ready to translate");
-    setProgress(0);
     setCurrentTime(0);
     setDuration(0);
     setError(null);
     setExportMessage(null);
+    setPlaybackMessage(null);
+  }
+
+  async function handlePlaybackError() {
+    if (!media?.path || !isDesktopRuntime()) {
+      setError("This video could not be decoded by the system player.");
+      return;
+    }
+    if (playbackFallbackRef.current === media.path) {
+      setError("This video could not be decoded after local compatibility conversion.");
+      return;
+    }
+
+    const sourcePath = media.path;
+    const generation = generationRef.current;
+    playbackFallbackRef.current = sourcePath;
+    setError(null);
+    setPlaybackMessage("Preparing a compatible local playback copy…");
+    try {
+      const playbackPath = await prepareCompatiblePlayback(sourcePath);
+      if (generation !== generationRef.current) {
+        return;
+      }
+      setMedia((current) =>
+        current?.path === sourcePath
+          ? { ...current, source: playbackPath, streamKind: "hls" }
+          : current,
+      );
+      setPlaybackMessage("Compatible local playback copy is ready.");
+    } catch (playbackError) {
+      if (generation === generationRef.current) {
+        setPlaybackMessage(null);
+        setError(`Could not prepare compatible playback. ${errorMessage(playbackError)}`);
+      }
+    }
   }
 
   async function openVideo() {
@@ -249,11 +317,11 @@ export function App() {
     try {
       const path = await chooseVideo();
       if (path) {
-        const authorizedPath = await authorizeMediaPath(path);
+        const authorized = await authorizeMediaPath(path);
         loadMedia({
-          name: getFileName(authorizedPath),
-          path: authorizedPath,
-          source: mediaSourceFromPath(authorizedPath),
+          name: getFileName(authorized.path),
+          path: authorized.path,
+          source: authorized.playbackUrl,
           canAnalyze: true,
         });
       }
@@ -342,64 +410,41 @@ export function App() {
       setError("Open the video from the desktop file picker before starting local analysis.");
       return;
     }
-    if (
-      !settings.ffmpegPath.trim() ||
-      !settings.whisperCliPath.trim() ||
-      !settings.whisperModelPath.trim()
-    ) {
+    if (settings.sourceLanguage === "auto" && settings.targetLanguage !== "en") {
       setError(
-        "Choose FFmpeg, Whisper CLI, and a Whisper model in Settings before starting transcription.",
+        "Choose the spoken language before translating locally to Chinese, Japanese, or Korean.",
       );
-      setSettingsOpen(true);
       return;
     }
-    if (
-      settings.targetLanguage !== "en" &&
-      settings.targetLanguage !== settings.sourceLanguage &&
-      (!settings.llamaCliPath.trim() || !settings.llamaModelPath.trim())
-    ) {
-      setError(
-        "Translation to this language requires llama.cpp CLI and a local GGUF model in Settings.",
-      );
-      setSettingsOpen(true);
-      return;
-    }
-
     const generationId = generationRef.current + 1;
     generationRef.current = generationId;
     setError(null);
     setExportMessage(null);
     setSegments([]);
     setAnalysisState("processing");
-    setAnalysisStage("Preparing local analysis");
-    setProgress(0);
 
     try {
       const result = await analyzeVideo({
         mediaPath: media.path,
-        ffmpegPath: settings.ffmpegPath.trim(),
-        whisperCliPath: settings.whisperCliPath.trim(),
-        whisperModelPath: settings.whisperModelPath.trim(),
-        llamaCliPath: settings.llamaCliPath.trim() || undefined,
-        llamaModelPath: settings.llamaModelPath.trim() || undefined,
+        ffmpegPath: "",
+        whisperCliPath: "",
+        whisperModelPath: "",
         sourceLanguage: settings.sourceLanguage,
         targetLanguage: settings.targetLanguage,
         generationId,
+        durationMs: duration > 0 ? Math.round(duration * 1000) : undefined,
       });
 
       if (result.generationId !== generationRef.current) {
         return;
       }
       setSegments(normalizeSegments(result.segments));
-      setProgress(1);
       setAnalysisState("complete");
-      setAnalysisStage(`${result.segments.length} captions ready`);
     } catch (analysisError) {
       if (generationId !== generationRef.current) {
         return;
       }
       setAnalysisState("error");
-      setAnalysisStage("Analysis stopped");
       setError(errorMessage(analysisError));
     }
   }
@@ -422,11 +467,6 @@ export function App() {
       setError(`Could not export subtitles. ${errorMessage(exportError)}`);
     }
   }
-
-  const statusLabel =
-    analysisState === "processing"
-      ? `${analysisStage}${progress > 0 ? ` · ${Math.round(progress * 100)}%` : ""}`
-      : analysisStage;
 
   return (
     <main className="app-shell">
@@ -471,14 +511,18 @@ export function App() {
             {/* biome-ignore lint/a11y/useMediaCaption: Playdub renders generated synchronized captions. */}
             <video
               ref={videoRef}
-              src={media.source}
+              src={media.streamKind === "hls" ? undefined : media.source}
               onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
               onDurationChange={(event) => setDuration(event.currentTarget.duration || 0)}
               onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
               onPlay={() => setIsPlaying(true)}
               onPause={() => setIsPlaying(false)}
               onEnded={() => setIsPlaying(false)}
-              onError={() => setError("This video could not be decoded by the system player.")}
+              onLoadedData={() => {
+                setError(null);
+                setPlaybackMessage(null);
+              }}
+              onError={handlePlaybackError}
               onDoubleClick={toggleFullscreen}
               aria-label={`Playing ${media.name}`}
             />
@@ -498,10 +542,6 @@ export function App() {
             <div className="player-chrome">
               <div className="now-playing">
                 <span className="media-name">{media.name}</span>
-                <span className={`analysis-status status-${analysisState}`}>
-                  {analysisState === "processing" && <span className="status-spinner" />}
-                  {statusLabel}
-                </span>
               </div>
               <label className="timeline">
                 <span className="visually-hidden">Playback position</span>
@@ -562,9 +602,7 @@ export function App() {
             <div>
               <span className="panel-eyebrow">Local captions</span>
               <h1>Understand every line.</h1>
-              <p>
-                Speech recognition and translation run through tools installed on this computer.
-              </p>
+              <p>Choose the spoken language and the subtitle language.</p>
             </div>
 
             <div className="language-flow">
@@ -615,35 +653,17 @@ export function App() {
               onClick={runAnalysis}
               disabled={analysisState === "processing"}
             >
-              {analysisState === "processing" ? "Processing locally…" : "Generate subtitles"}
+              {analysisState === "processing" ? "Generating subtitles…" : "Generate subtitles"}
             </button>
 
-            {analysisState === "processing" && (
-              <div className="progress-block" role="status" aria-live="polite">
-                <div className="progress-track">
-                  <span
-                    className={progress === 0 ? "indeterminate" : ""}
-                    style={progress > 0 ? { width: `${progress * 100}%` } : undefined}
-                  />
-                </div>
-                <span>{statusLabel}</span>
-              </div>
-            )}
-
             {segments.length > 0 && (
-              <div className="result-card">
-                <div>
-                  <strong>{segments.length} captions</strong>
-                  <span>Synced to playback</span>
-                </div>
-                <div className="export-actions">
-                  <button type="button" onClick={() => exportCaptionFile("srt")}>
-                    Export SRT
-                  </button>
-                  <button type="button" onClick={() => exportCaptionFile("vtt")}>
-                    Export VTT
-                  </button>
-                </div>
+              <div className="export-actions">
+                <button type="button" onClick={() => exportCaptionFile("srt")}>
+                  Export SRT
+                </button>
+                <button type="button" onClick={() => exportCaptionFile("vtt")}>
+                  Export VTT
+                </button>
               </div>
             )}
 
@@ -659,6 +679,11 @@ export function App() {
             {exportMessage && (
               <div className="notice success-notice" role="status">
                 {exportMessage}
+              </div>
+            )}
+            {playbackMessage && (
+              <div className="notice success-notice" role="status">
+                {playbackMessage}
               </div>
             )}
 
@@ -715,7 +740,7 @@ export function App() {
           >
             <div className="settings-header">
               <div>
-                <span className="panel-eyebrow">Local runtime</span>
+                <span className="panel-eyebrow">Playback</span>
                 <h2 id="settings-title">Settings</h2>
               </div>
               <button
@@ -729,56 +754,9 @@ export function App() {
               </button>
             </div>
             <p className="settings-intro">
-              Playdub never downloads or uploads media. Choose executables and models you have
-              reviewed and installed locally.
+              Playdub manages its local processing components automatically. Your media and
+              subtitles stay on this device.
             </p>
-
-            <SettingsPath
-              label="FFmpeg executable"
-              value={settings.ffmpegPath}
-              placeholder="/path/to/ffmpeg"
-              onChange={(value) => setSettings((current) => ({ ...current, ffmpegPath: value }))}
-              onBrowse={() => chooseExecutable("Choose FFmpeg")}
-            />
-            <SettingsPath
-              label="Whisper CLI executable"
-              value={settings.whisperCliPath}
-              placeholder="/path/to/whisper-cli"
-              onChange={(value) =>
-                setSettings((current) => ({ ...current, whisperCliPath: value }))
-              }
-              onBrowse={() => chooseExecutable("Choose Whisper CLI")}
-            />
-            <SettingsPath
-              label="Whisper model"
-              value={settings.whisperModelPath}
-              placeholder="/path/to/model.bin"
-              onChange={(value) =>
-                setSettings((current) => ({ ...current, whisperModelPath: value }))
-              }
-              onBrowse={() => chooseModel("Choose Whisper model")}
-            />
-
-            <div className="settings-divider">
-              <span>Non-English translation</span>
-            </div>
-
-            <SettingsPath
-              label="llama.cpp CLI executable"
-              value={settings.llamaCliPath}
-              placeholder="/path/to/llama-cli"
-              onChange={(value) => setSettings((current) => ({ ...current, llamaCliPath: value }))}
-              onBrowse={() => chooseExecutable("Choose llama.cpp CLI")}
-            />
-            <SettingsPath
-              label="Translation model"
-              value={settings.llamaModelPath}
-              placeholder="/path/to/model.gguf"
-              onChange={(value) =>
-                setSettings((current) => ({ ...current, llamaModelPath: value }))
-              }
-              onBrowse={() => chooseModel("Choose translation model")}
-            />
 
             <label className="toggle-row">
               <span>
@@ -817,44 +795,5 @@ export function App() {
         </div>
       )}
     </main>
-  );
-}
-
-interface SettingsPathProps {
-  label: string;
-  value: string;
-  placeholder: string;
-  onChange: (value: string) => void;
-  onBrowse: () => Promise<string | null>;
-}
-
-function SettingsPath({ label, value, placeholder, onChange, onBrowse }: SettingsPathProps) {
-  async function browse() {
-    try {
-      const selection = await onBrowse();
-      if (selection) {
-        onChange(selection);
-      }
-    } catch {
-      // The editable field remains available if the native picker is unavailable.
-    }
-  }
-
-  return (
-    <label className="path-field">
-      <span>{label}</span>
-      <span className="path-input">
-        <input
-          type="text"
-          value={value}
-          placeholder={placeholder}
-          spellCheck={false}
-          onChange={(event) => onChange(event.target.value)}
-        />
-        <button type="button" onClick={browse} disabled={!isDesktopRuntime()}>
-          Browse
-        </button>
-      </span>
-    </label>
   );
 }

@@ -26,6 +26,13 @@ dedicated legal-review issue. This includes GPL, AGPL, LGPL, SSPL, Commons Claus
 license containing use restrictions. Approval must be explicit and documented; the category is not
 an automatic rejection.
 
+### Admitted application dependencies
+
+| Dependency | Exact version | Upstream | License | Purpose and distribution |
+| --- | --- | --- | --- | --- |
+| `getrandom` | 0.3.4 | `https://github.com/rust-random/getrandom` tag `v0.3.4` | MIT OR Apache-2.0 | Requests an operating-system random token for loopback media URLs. Rust source is compiled into Playdub on supported desktop targets; it adds no codec, network client, or model behavior. |
+| `hls.js` | 1.6.16 | `https://github.com/video-dev/hls.js` tag `v1.6.16` | Apache-2.0 | Plays the application-owned HLS compatibility stream through Media Source Extensions on Windows and other WebViews without native HLS. It is bundled with the frontend and makes no external request. |
+
 ## Media stack
 
 FFmpeg and mpv build configuration changes their effective distribution obligations. Official
@@ -39,22 +46,23 @@ builds must:
 
 Do not download an arbitrary prebuilt codec or mpv binary in CI.
 
-The prototype does not distribute or link FFmpeg. It launches a user-selected FFmpeg executable to
+The prototype does not distribute or link FFmpeg. It launches a locally installed FFmpeg executable to
 extract working audio. This lowers Playdub's distribution surface but does not grant the user a
 license to that binary or its enabled codecs. For the documented conservative configuration, see
 [prototype setup](../prototype/setup.md).
 
 ## User-supplied inference tools
 
-The prototype can launch user-selected `whisper-cli` and, optionally, `llama-cli`. The upstream
+The prototype can launch locally installed `whisper-cli`, `argos-translate`, and, optionally,
+`llama-cli`. The upstream
 whisper.cpp and llama.cpp source projects state MIT licenses, but that says nothing about a selected
 model file. Project documentation must never describe the CLI's software license as the model's
 license.
 
-Paths selected in the prototype are local, unsupported configuration. They are not registry
-approval. A future official build that bundles an executable, downloads it, recommends a specific
-model, or provides a one-click model installation changes the distribution and endorsement surface
-and therefore requires a fresh dependency/model review.
+The local runtime is unsupported configuration, not registry approval. A future official build
+that bundles an executable, downloads it, recommends a specific model, or provides a one-click
+model installation changes the distribution and endorsement surface and therefore requires a fresh
+dependency/model review.
 
 ## Model admission
 

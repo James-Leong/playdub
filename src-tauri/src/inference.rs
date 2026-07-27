@@ -1,5 +1,5 @@
 use crate::subtitles::{
-    Cue, SubtitleSegment, align_translation, parse_srt, render_srt, render_vtt,
+    Cue, SubtitleSegment, align_translation, parse_whisper_srt, render_srt, render_vtt,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -14,13 +14,15 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const MAX_MEDIA_BYTES: u64 = 100 * 1024 * 1024 * 1024;
+pub(crate) const MAX_MEDIA_BYTES: u64 = 100 * 1024 * 1024 * 1024;
 const MAX_MODEL_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_AUDIO_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_SUBTITLE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const MAX_TRANSLATION_PROMPT_BYTES: usize = 24 * 1024;
 const TRANSLATION_BATCH_SIZE: usize = 24;
+const FIRST_ANALYSIS_WINDOW_MS: u64 = 60 * 1_000;
+const ANALYSIS_WINDOW_MS: u64 = 5 * 60 * 1_000;
 const EXTRACT_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 const INFERENCE_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 const TRANSLATION_BATCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -35,9 +37,11 @@ pub(crate) struct AnalyzeVideoRequest {
     pub whisper_model_path: String,
     pub llama_cli_path: Option<String>,
     pub llama_model_path: Option<String>,
+    pub argos_translate_path: Option<String>,
     pub source_language: String,
     pub target_language: String,
     pub generation_id: u64,
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -79,7 +83,7 @@ pub(crate) struct ExportSubtitlesRequest {
 }
 
 #[derive(Debug)]
-pub(crate) struct InferenceError(String);
+pub(crate) struct InferenceError(pub(crate) String);
 
 impl fmt::Display for InferenceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -89,15 +93,17 @@ impl fmt::Display for InferenceError {
 
 impl std::error::Error for InferenceError {}
 
-type Result<T> = std::result::Result<T, InferenceError>;
+pub(crate) type Result<T> = std::result::Result<T, InferenceError>;
 
-pub(crate) fn analyze_video<F>(
+pub(crate) fn analyze_video<F, G>(
     request: AnalyzeVideoRequest,
     cache_directory: &Path,
     progress: F,
+    partial_result: G,
 ) -> Result<AnalysisResult>
 where
     F: Fn(&'static str, f64, &'static str),
+    G: Fn(&[SubtitleSegment]),
 {
     validate_language(&request.source_language, "source")?;
     validate_language(&request.target_language, "target")?;
@@ -111,53 +117,91 @@ where
         MAX_MODEL_BYTES,
     )?;
     let job = JobDirectory::create(cache_directory)?;
-    let audio = job.path().join("audio.wav");
+    let duration_ms = request
+        .duration_ms
+        .filter(|duration| *duration > 0)
+        .ok_or_else(|| {
+            InferenceError(
+                "The video duration is unavailable; reopen the video and try again".to_owned(),
+            )
+        })?;
+    let mut offset_ms = 0_u64;
+    let mut window_index = 0_u64;
+    let mut next_segment_id = 1_u32;
+    let mut segments = Vec::new();
 
-    progress("extracting", 0.05, "Extracting audio locally");
-    extract_audio(&ffmpeg, &media, &audio, job.path())?;
-    validate_generated_file(&audio, "extracted audio", MAX_AUDIO_BYTES)?;
-    let duration_ms = wav_duration_ms(&audio)?;
+    while offset_ms < duration_ms {
+        let requested_window_ms = if window_index == 0 {
+            FIRST_ANALYSIS_WINDOW_MS
+        } else {
+            ANALYSIS_WINDOW_MS
+        };
+        let window_ms = requested_window_ms.min(duration_ms - offset_ms);
+        let window_directory = job.path().join(format!("window-{window_index:06}"));
+        fs::create_dir(&window_directory).map_err(|error| {
+            InferenceError(format!("Could not create an analysis window: {error}"))
+        })?;
+        let audio = window_directory.join("audio.wav");
+        let fraction = analysis_fraction(offset_ms, duration_ms);
 
-    progress("recognizing", 0.25, "Recognizing speech on this device");
-    let source_output = job.path().join("source");
-    run_whisper(
-        &whisper,
-        &whisper_model,
-        &audio,
-        &source_output,
-        &request.source_language,
-        false,
-        job.path(),
-        "whisper-source",
-    )?;
-    let source_cues = read_srt(&source_output.with_extension("srt"))?;
-    if source_cues.is_empty() {
-        return Err(InferenceError(
-            "Whisper produced no speech segments for this video".to_owned(),
-        ));
+        progress("extracting", fraction, "Preparing the next local segment");
+        extract_audio_window(
+            &ffmpeg,
+            &media,
+            &audio,
+            &window_directory,
+            offset_ms,
+            window_ms,
+        )?;
+        validate_generated_file(&audio, "extracted audio", MAX_AUDIO_BYTES)?;
+        if wav_duration_ms(&audio)? == 0 {
+            offset_ms = offset_ms.saturating_add(window_ms);
+            window_index = window_index.saturating_add(1);
+            continue;
+        }
+
+        progress(
+            "recognizing",
+            fraction,
+            "Recognizing the next local segment",
+        );
+        let source_output = window_directory.join("source");
+        run_whisper(
+            &whisper,
+            &whisper_model,
+            &audio,
+            &source_output,
+            &request.source_language,
+            false,
+            &window_directory,
+            "whisper-source",
+        )?;
+        let source_cues = read_srt(&source_output.with_extension("srt"))?;
+        if !source_cues.is_empty() {
+            progress("translating", fraction, "Translating new captions locally");
+            let translated = translate(
+                &request,
+                &whisper,
+                &whisper_model,
+                &audio,
+                &source_cues,
+                &window_directory,
+            )?;
+            let window_segments =
+                offset_segments(&source_cues, translated, offset_ms, &mut next_segment_id);
+            partial_result(&window_segments);
+            segments.extend(window_segments);
+        }
+
+        offset_ms = offset_ms.saturating_add(window_ms);
+        window_index = window_index.saturating_add(1);
     }
 
-    progress("translating", 0.65, "Translating subtitle segments locally");
-    let translated = translate(
-        &request,
-        &whisper,
-        &whisper_model,
-        &audio,
-        &source_cues,
-        job.path(),
-    )?;
-    let segments = source_cues
-        .iter()
-        .zip(translated)
-        .enumerate()
-        .map(|(index, (cue, translated_text))| SubtitleSegment {
-            id: u32::try_from(index + 1).expect("cue count is bounded below u32"),
-            start_ms: cue.start_ms,
-            end_ms: cue.end_ms,
-            source_text: cue.text.clone(),
-            translated_text,
-        })
-        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return Err(InferenceError(
+            "No speech was recognized in this video".to_owned(),
+        ));
+    }
     progress("complete", 1.0, "Local subtitles are ready");
     Ok(AnalysisResult {
         generation_id: request.generation_id,
@@ -166,6 +210,38 @@ where
         target_language: request.target_language,
         segments,
     })
+}
+
+fn analysis_fraction(offset_ms: u64, duration_ms: u64) -> f64 {
+    let permille = offset_ms
+        .min(duration_ms)
+        .saturating_mul(1_000)
+        .checked_div(duration_ms)
+        .unwrap_or_default();
+    f64::from(u32::try_from(permille).expect("analysis progress is at most 1000")) / 1_000.0
+}
+
+fn offset_segments(
+    source_cues: &[Cue],
+    translated: Vec<Option<String>>,
+    offset_ms: u64,
+    next_segment_id: &mut u32,
+) -> Vec<SubtitleSegment> {
+    source_cues
+        .iter()
+        .zip(translated)
+        .map(|(cue, translated_text)| {
+            let segment = SubtitleSegment {
+                id: *next_segment_id,
+                start_ms: cue.start_ms.saturating_add(offset_ms),
+                end_ms: cue.end_ms.saturating_add(offset_ms),
+                source_text: cue.text.clone(),
+                translated_text,
+            };
+            *next_segment_id = next_segment_id.saturating_add(1);
+            segment
+        })
+        .collect()
 }
 
 fn wav_duration_ms(path: &Path) -> Result<u64> {
@@ -260,6 +336,21 @@ fn translate(
             .collect());
     }
 
+    if let Some(path) = request
+        .argos_translate_path
+        .as_deref()
+        .filter(|path| !path.is_empty() && !is_english(&request.target_language))
+    {
+        let argos = validate_executable(path, "argos-translate")?;
+        return translate_with_argos(
+            &argos,
+            source_cues,
+            &request.source_language,
+            &request.target_language,
+            job_directory,
+        );
+    }
+
     if is_english(&request.target_language) {
         let translated_output = job_directory.join("english");
         run_whisper(
@@ -300,6 +391,106 @@ fn translate(
     )
 }
 
+fn translate_with_argos(
+    executable: &Path,
+    source_cues: &[Cue],
+    source_language: &str,
+    target_language: &str,
+    job_directory: &Path,
+) -> Result<Vec<Option<String>>> {
+    let source = argos_language_code(source_language)?;
+    let target = argos_language_code(target_language)?;
+    let input_path = job_directory.join("argos.batch.input");
+    let output_path = job_directory.join("argos.batch.output");
+    let error_path = job_directory.join("argos.batch.stderr");
+    write_argos_batch(&input_path, source_cues)?;
+    let arguments = [
+        OsString::from("--playdub-batch"),
+        OsString::from(source),
+        OsString::from(target),
+    ];
+    run_command_with_input(
+        executable,
+        &arguments,
+        job_directory,
+        &input_path,
+        &output_path,
+        &error_path,
+        TRANSLATION_BATCH_TIMEOUT,
+    )?;
+    let output = read_limited(&output_path, MAX_SUBTITLE_BYTES, "Argos batch response")?;
+    parse_argos_batch(&output, source_cues.len())
+}
+
+fn write_argos_batch(path: &Path, source_cues: &[Cue]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| InferenceError(format!("Could not create Argos batch input: {error}")))?;
+    for (index, cue) in source_cues.iter().enumerate() {
+        let text = cue.text.trim();
+        if text.len() > MAX_TRANSLATION_PROMPT_BYTES {
+            return Err(InferenceError(format!(
+                "Subtitle cue {} exceeds the local translation input limit",
+                index + 1
+            )));
+        }
+        let length = u32::try_from(text.len())
+            .map_err(|_| InferenceError("Argos batch input is too large".to_owned()))?;
+        file.write_all(&length.to_be_bytes())
+            .and_then(|()| file.write_all(text.as_bytes()))
+            .map_err(|error| {
+                InferenceError(format!("Could not write Argos batch input: {error}"))
+            })?;
+    }
+    Ok(())
+}
+
+fn parse_argos_batch(bytes: &[u8], expected: usize) -> Result<Vec<Option<String>>> {
+    let mut offset = 0_usize;
+    let mut translated = Vec::with_capacity(expected);
+    while offset < bytes.len() {
+        let header_end = offset
+            .checked_add(4)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| InferenceError("Argos returned a truncated batch header".to_owned()))?;
+        let length = u32::from_be_bytes(
+            bytes[offset..header_end]
+                .try_into()
+                .expect("batch header is exactly four bytes"),
+        ) as usize;
+        let text_end = header_end
+            .checked_add(length)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| InferenceError("Argos returned a truncated batch item".to_owned()))?;
+        let text = std::str::from_utf8(&bytes[header_end..text_end])
+            .map_err(|_| InferenceError("Argos response is not valid UTF-8".to_owned()))?
+            .trim();
+        translated.push((!text.is_empty()).then(|| text.to_owned()));
+        offset = text_end;
+    }
+    if translated.len() != expected {
+        return Err(InferenceError(format!(
+            "Argos returned {} translations for {expected} subtitle cues",
+            translated.len()
+        )));
+    }
+    Ok(translated)
+}
+
+fn argos_language_code(language: &str) -> Result<&'static str> {
+    match normalize_language(language).as_str() {
+        "zh" | "zh-cn" | "zho" | "chinese" => Ok("zh"),
+        "ja" | "jpn" | "japanese" => Ok("ja"),
+        "ko" | "kor" | "korean" => Ok("ko"),
+        "en" | "eng" | "english" => Ok("en"),
+        _ => Err(InferenceError(format!(
+            "The default Argos translation path supports only Chinese, Japanese, Korean, and English; got '{language}'"
+        ))),
+    }
+}
+
 fn language_matches(left: &str, right: &str) -> bool {
     normalize_language(left) == normalize_language(right)
 }
@@ -330,15 +521,26 @@ fn validate_language(language: &str, kind: &str) -> Result<()> {
     Ok(())
 }
 
-fn extract_audio(ffmpeg: &Path, media: &Path, audio: &Path, job_directory: &Path) -> Result<()> {
+fn extract_audio_window(
+    ffmpeg: &Path,
+    media: &Path,
+    audio: &Path,
+    job_directory: &Path,
+    offset_ms: u64,
+    duration_ms: u64,
+) -> Result<()> {
     let arguments = [
         OsString::from("-nostdin"),
         OsString::from("-hide_banner"),
         OsString::from("-loglevel"),
         OsString::from("error"),
         OsString::from("-y"),
+        OsString::from("-ss"),
+        OsString::from(ffmpeg_timestamp(offset_ms)),
         OsString::from("-i"),
         media.as_os_str().to_owned(),
+        OsString::from("-t"),
+        OsString::from(ffmpeg_timestamp(duration_ms)),
         OsString::from("-map"),
         OsString::from("0:a:0"),
         OsString::from("-vn"),
@@ -351,6 +553,10 @@ fn extract_audio(ffmpeg: &Path, media: &Path, audio: &Path, job_directory: &Path
         audio.as_os_str().to_owned(),
     ];
     run_command(ffmpeg, &arguments, job_directory, "ffmpeg", EXTRACT_TIMEOUT)
+}
+
+fn ffmpeg_timestamp(milliseconds: u64) -> String {
+    format!("{}.{:03}", milliseconds / 1_000, milliseconds % 1_000)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -398,7 +604,7 @@ fn read_srt(path: &Path) -> Result<Vec<Cue>> {
     let contents = read_limited(path, MAX_SUBTITLE_BYTES, "Whisper subtitle output")?;
     let text = String::from_utf8(contents)
         .map_err(|_| InferenceError("Whisper subtitle output is not valid UTF-8".to_owned()))?;
-    parse_srt(&text).map_err(InferenceError)
+    parse_whisper_srt(&text).map_err(InferenceError)
 }
 
 fn translate_with_llama(
@@ -628,7 +834,7 @@ fn write_export(path: &Path, contents: &[u8], overwrite: bool) -> Result<()> {
         .map_err(|error| InferenceError(format!("Could not write subtitle output: {error}")))
 }
 
-fn validate_input_file(value: &str, kind: &str, maximum_size: u64) -> Result<PathBuf> {
+pub(crate) fn validate_input_file(value: &str, kind: &str, maximum_size: u64) -> Result<PathBuf> {
     let path = Path::new(value);
     if !path.is_absolute() {
         return Err(InferenceError(format!("{kind} path must be absolute")));
@@ -650,7 +856,7 @@ fn validate_input_file(value: &str, kind: &str, maximum_size: u64) -> Result<Pat
     Ok(canonical)
 }
 
-fn validate_executable(value: &str, kind: &str) -> Result<PathBuf> {
+pub(crate) fn validate_executable(value: &str, kind: &str) -> Result<PathBuf> {
     let executable = validate_input_file(value, kind, 1024 * 1024 * 1024)?;
     #[cfg(unix)]
     {
@@ -669,7 +875,7 @@ fn validate_executable(value: &str, kind: &str) -> Result<PathBuf> {
     Ok(executable)
 }
 
-fn validate_generated_file(path: &Path, kind: &str, maximum_size: u64) -> Result<()> {
+pub(crate) fn validate_generated_file(path: &Path, kind: &str, maximum_size: u64) -> Result<()> {
     let metadata = path
         .symlink_metadata()
         .map_err(|error| InferenceError(format!("{kind} was not created: {error}")))?;
@@ -706,7 +912,7 @@ fn read_limited(path: &Path, limit: u64, kind: &str) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-fn run_command(
+pub(crate) fn run_command(
     executable: &Path,
     arguments: &[OsString],
     working_directory: &Path,
@@ -743,6 +949,40 @@ fn run_command_with_logs(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
     let mut child = command
+        .spawn()
+        .map_err(|error| InferenceError(format!("Could not start local process: {error}")))?;
+    let status = wait_with_timeout(&mut child, timeout)?;
+    if !status.success() {
+        let diagnostics = read_log_excerpt(error_path)
+            .or_else(|| read_log_excerpt(output_path))
+            .unwrap_or_else(|| "no diagnostic output".to_owned());
+        return Err(InferenceError(format!(
+            "Local process failed with {status}: {diagnostics}"
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_command_with_input(
+    executable: &Path,
+    arguments: &[OsString],
+    working_directory: &Path,
+    input_path: &Path,
+    output_path: &Path,
+    error_path: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    let stdin = File::open(input_path)
+        .map_err(|error| InferenceError(format!("Could not open local process input: {error}")))?;
+    let stdout = create_log(output_path)?;
+    let stderr = create_log(error_path)?;
+    let mut child = Command::new(executable)
+        .args(arguments)
+        .current_dir(working_directory)
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
         .spawn()
         .map_err(|error| InferenceError(format!("Could not start local process: {error}")))?;
     let status = wait_with_timeout(&mut child, timeout)?;
@@ -885,6 +1125,55 @@ mod tests {
         assert!(validate_language("zh-CN", "target").is_ok());
         assert!(validate_language("English", "target").is_ok());
         assert!(validate_language("../bad", "target").is_err());
+    }
+
+    #[test]
+    fn limits_argos_translation_to_foundation_languages() {
+        assert_eq!(argos_language_code("Japanese").unwrap(), "ja");
+        assert_eq!(argos_language_code("zh-CN").unwrap(), "zh");
+        assert_eq!(argos_language_code("Korean").unwrap(), "ko");
+        assert_eq!(argos_language_code("English").unwrap(), "en");
+        assert!(argos_language_code("French").is_err());
+    }
+
+    #[test]
+    fn parses_length_prefixed_argos_batch_in_order() {
+        let mut response = Vec::new();
+        for text in ["你好", "世界"] {
+            response.extend_from_slice(
+                &u32::try_from(text.len())
+                    .expect("test text length fits u32")
+                    .to_be_bytes(),
+            );
+            response.extend_from_slice(text.as_bytes());
+        }
+        assert_eq!(
+            parse_argos_batch(&response, 2).unwrap(),
+            vec![Some("你好".to_owned()), Some("世界".to_owned())]
+        );
+        assert!(parse_argos_batch(&response, 3).is_err());
+        assert!(parse_argos_batch(&response[..response.len() - 1], 2).is_err());
+    }
+
+    #[test]
+    fn offsets_incremental_segments_on_the_playback_clock() {
+        let cues = vec![Cue {
+            start_ms: 250,
+            end_ms: 1_250,
+            text: "hello".to_owned(),
+        }];
+        let mut next_id = 7;
+        assert_eq!(
+            offset_segments(&cues, vec![Some("你好".to_owned())], 60_000, &mut next_id),
+            vec![SubtitleSegment {
+                id: 7,
+                start_ms: 60_250,
+                end_ms: 61_250,
+                source_text: "hello".to_owned(),
+                translated_text: Some("你好".to_owned()),
+            }]
+        );
+        assert_eq!(next_id, 8);
     }
 
     #[test]

@@ -21,7 +21,7 @@ that can exercise an instruction-capable GGUF model for experimental text transl
 For the prototype:
 
 - playback uses an HTML5 video element in the Tauri system WebView;
-- the Rust core launches only executable paths explicitly selected by the user;
+- the Rust core launches only local executables resolved from the startup `PATH`;
 - FFmpeg produces a private 16 kHz mono WAV working file;
 - `whisper-cli` produces timestamped SRT output;
 - a second Whisper pass may translate speech to English;
@@ -49,7 +49,7 @@ errors when a path is absent or incompatible; it cannot silently download a repl
 ## Security constraints
 
 - Invoke executables directly with argument arrays; never interpolate a shell command.
-- Canonicalize and validate user-selected executable, model, and media paths in the Rust core.
+- Canonicalize and validate resolved executable, model, and media paths in the Rust core.
 - Treat SRT and translator output as untrusted, enforce size limits, and render it as text.
 - Create working files under an application-owned temporary directory with private permissions.
 - Do not pass media content, transcripts, or paths to an online service.

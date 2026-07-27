@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 
 const MAX_CUES: usize = 100_000;
 const MAX_CUE_TEXT_BYTES: usize = 64 * 1024;
+const INVALID_CUE_ORDER: &str = "An SRT cue must end after it starts";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,7 +23,19 @@ pub(crate) struct Cue {
     pub text: String,
 }
 
+#[cfg(test)]
 pub(crate) fn parse_srt(input: &str) -> Result<Vec<Cue>, String> {
+    parse_srt_with_invalid_timing(input, false)
+}
+
+pub(crate) fn parse_whisper_srt(input: &str) -> Result<Vec<Cue>, String> {
+    parse_srt_with_invalid_timing(input, true)
+}
+
+fn parse_srt_with_invalid_timing(
+    input: &str,
+    skip_invalid_timing: bool,
+) -> Result<Vec<Cue>, String> {
     let normalized = input
         .strip_prefix('\u{feff}')
         .unwrap_or(input)
@@ -36,7 +49,11 @@ pub(crate) fn parse_srt(input: &str) -> Result<Vec<Cue>, String> {
             if block.is_empty() {
                 continue;
             }
-            parse_srt_block(&block, &mut cues)?;
+            match parse_srt_block(&block, &mut cues) {
+                Ok(()) => {}
+                Err(error) if skip_invalid_timing && error == INVALID_CUE_ORDER => {}
+                Err(error) => return Err(error),
+            }
             block.clear();
             continue;
         }
@@ -83,7 +100,7 @@ fn parse_timing_line(line: &str) -> Result<(u64, u64), String> {
     let start_ms = parse_timestamp(start.trim())?;
     let end_ms = parse_timestamp(end.trim())?;
     if end_ms <= start_ms {
-        return Err("An SRT cue must end after it starts".to_owned());
+        return Err(INVALID_CUE_ORDER.to_owned());
     }
     Ok((start_ms, end_ms))
 }
@@ -294,6 +311,28 @@ mod tests {
     fn rejects_invalid_or_reversed_timestamps() {
         assert!(parse_srt("1\n00:61:00,000 --> 00:62:00,000\nbad\n").is_err());
         assert!(parse_srt("1\n00:00:02,000 --> 00:00:01,000\nbad\n").is_err());
+    }
+
+    #[test]
+    fn whisper_parser_drops_only_zero_or_reversed_boundary_cues() {
+        let input = "\
+1
+00:00:00,000 --> 00:00:01,000
+first
+
+2
+00:01:00,000 --> 00:01:00,000
+invalid boundary
+
+3
+00:01:00,000 --> 00:01:01,500
+second
+";
+        assert!(parse_srt(input).is_err());
+        assert_eq!(
+            parse_whisper_srt(input).unwrap(),
+            vec![cue(0, 1_000, "first"), cue(60_000, 61_500, "second")]
+        );
     }
 
     #[test]

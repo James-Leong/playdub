@@ -21,8 +21,8 @@ GitHub Release or make the package signed/release-grade.
 
 The workflow installs locked JavaScript/Rust dependencies and Tauri's platform build prerequisites,
 then builds the application source. It does not download or bundle FFmpeg, whisper.cpp, llama.cpp,
-codecs, model weights, tokenizer files, or test media. Users must configure those local paths after
-installing an artifact.
+codecs, model weights, tokenizer files, or test media. Install the local runtime separately and
+set `PLAYDUB_WHISPER_MODEL` before launching the application.
 
 Artifacts are retained for 14 days and are intended for prototype testing. Do not describe a green
 matrix as proof of runtime playback/ASR behavior: GitHub's package job compiles the app but has no
