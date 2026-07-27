@@ -64,8 +64,8 @@ be used to place captions.
 
 ### Prototype inference adapter
 
-ASR and translation execute in user-selected external CLI processes started by the trusted Rust
-core. The current batch pipeline is:
+ASR and translation execute in locally installed CLI processes started by the trusted Rust core.
+The current batch pipeline is:
 
 1. FFmpeg decodes the selected media into a private 16 kHz mono WAV working file.
 2. `whisper-cli` generates an SRT transcript with media timestamps.
@@ -74,9 +74,10 @@ core. The current batch pipeline is:
    instruction-capable GGUF model.
 
 The tools and models are never downloaded or bundled by Playdub. Process arguments are passed
-without a shell, paths are selected through trusted dialogs, output is bounded and parsed as
-untrusted data, and temporary files are deleted on normal completion. A task generation ID prevents
-late results from replacing a newer media session.
+without a shell, executables resolve only from the application's startup `PATH`, the Whisper model
+uses `PLAYDUB_WHISPER_MODEL`, output is bounded and parsed as untrusted data, and temporary files
+are deleted on normal completion. A task generation ID prevents late results from replacing a newer
+media session.
 
 This prototype processes a batch rather than a true streaming look-ahead window. It demonstrates
 the complete local pipeline, but VAD, chunk scheduling, crash-isolated workers, incremental

@@ -316,38 +316,6 @@ h1 {
   white-space: nowrap;
 }
 
-.analysis-status {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 7px;
-  align-items: center;
-  color: rgba(255, 255, 255, 0.48);
-  font-size: 11px;
-}
-
-.status-complete {
-  color: var(--accent);
-}
-
-.status-error {
-  color: #ff928b;
-}
-
-.status-spinner {
-  width: 10px;
-  height: 10px;
-  border: 1.5px solid rgba(255, 255, 255, 0.2);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.85s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .timeline {
   display: block;
 }
@@ -528,65 +496,6 @@ select,
   min-width: 90px;
 }
 
-.progress-block {
-  display: grid;
-  gap: 8px;
-  color: rgba(255, 255, 255, 0.42);
-  font-size: 11px;
-}
-
-.progress-track {
-  height: 3px;
-  overflow: hidden;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.07);
-}
-
-.progress-track span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--accent);
-  transition: width 180ms ease;
-}
-
-.progress-track .indeterminate {
-  width: 40%;
-  animation: progress-slide 1.5s ease-in-out infinite;
-}
-
-@keyframes progress-slide {
-  from {
-    transform: translateX(-110%);
-  }
-  to {
-    transform: translateX(360%);
-  }
-}
-
-.result-card {
-  display: grid;
-  gap: 14px;
-  padding: 15px;
-  border: 1px solid rgba(200, 255, 86, 0.13);
-  border-radius: 12px;
-  background: rgba(200, 255, 86, 0.045);
-}
-
-.result-card > div:first-child {
-  display: flex;
-  justify-content: space-between;
-}
-
-.result-card strong {
-  font-size: 12px;
-}
-
-.result-card span {
-  color: rgba(255, 255, 255, 0.4);
-  font-size: 10px;
-}
-
 .export-actions {
   display: grid;
   gap: 8px;
@@ -712,49 +621,6 @@ select,
   color: var(--muted);
   font-size: 12px;
   line-height: 1.55;
-}
-
-.path-field {
-  margin-top: 15px;
-}
-
-.path-input {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-.path-input input {
-  border-radius: 9px 0 0 9px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-}
-
-.path-input button {
-  min-width: 72px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-left: 0;
-  border-radius: 0 9px 9px 0;
-  background: rgba(255, 255, 255, 0.07);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.settings-divider {
-  display: flex;
-  align-items: center;
-  margin: 25px 0 2px;
-  color: rgba(255, 255, 255, 0.28);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.settings-divider::after {
-  height: 1px;
-  margin-left: 10px;
-  background: rgba(255, 255, 255, 0.07);
-  content: "";
-  flex: 1;
 }
 
 .toggle-row {

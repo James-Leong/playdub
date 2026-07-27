@@ -21,7 +21,7 @@ The current vertical slice is designed to prove a local workflow, not broad comp
 - The prototype extracts and processes a batch; it is not yet streaming ASR or a 30–90 second
   look-ahead scheduler.
 - First captions may take significant time on long media or slow hardware.
-- Accuracy and language coverage depend on the user-selected Whisper model, audio quality, speech,
+- Accuracy and language coverage depend on the locally configured Whisper model, audio quality, speech,
   and whisper.cpp build.
 - An English-only `.en` model does not support multilingual source audio.
 - Speaker identification, overlapping-speech handling, terminology dictionaries, and guaranteed
@@ -31,7 +31,7 @@ The current vertical slice is designed to prove a local workflow, not broad comp
 
 - Whisper's translation mode targets English only.
 - Other target languages require optional `llama-cli` and an instruction-capable GGUF model.
-- Playdub does not validate that a user-selected GGUF model supports either requested language.
+- Playdub does not validate that a locally configured GGUF model supports either requested language.
 - LLM output can be inaccurate or structurally inconsistent. It is not appropriate for safety-
   critical, legal, medical, or otherwise consequential reliance without expert review.
 

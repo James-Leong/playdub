@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -10,6 +10,11 @@ export interface SubtitleSegment {
   translatedText?: string;
 }
 
+export interface AuthorizedMedia {
+  path: string;
+  playbackUrl: string;
+}
+
 export interface AnalysisRequest {
   mediaPath: string;
   ffmpegPath: string;
@@ -17,9 +22,11 @@ export interface AnalysisRequest {
   whisperModelPath: string;
   llamaCliPath?: string;
   llamaModelPath?: string;
+  argosTranslatePath?: string;
   sourceLanguage: string;
   targetLanguage: string;
   generationId: number;
+  durationMs?: number;
 }
 
 export interface AnalysisResult {
@@ -35,11 +42,9 @@ export interface ExportSubtitlesRequest {
   segments: SubtitleSegment[];
 }
 
-export interface AnalysisProgress {
+export interface AnalysisSegments {
   generationId: number;
-  progress: number;
-  stage: "extracting" | "recognizing" | "translating" | "complete";
-  message?: string;
+  segments: SubtitleSegment[];
 }
 
 const VIDEO_FILTERS = [
@@ -63,43 +68,27 @@ export async function chooseVideo(): Promise<string | null> {
   return typeof selection === "string" ? selection : null;
 }
 
-export async function authorizeMediaPath(mediaPath: string): Promise<string> {
-  return invoke<string>("authorize_media_path", { mediaPath });
-}
-
-export async function chooseExecutable(title: string): Promise<string | null> {
-  const selection = await open({
-    title,
-    multiple: false,
-    directory: false,
-  });
-  return typeof selection === "string" ? selection : null;
-}
-
-export async function chooseModel(title: string): Promise<string | null> {
-  const selection = await open({
-    title,
-    multiple: false,
-    directory: false,
-    filters: [{ name: "Model", extensions: ["bin", "gguf", "onnx"] }],
-  });
-  return typeof selection === "string" ? selection : null;
-}
-
-export function mediaSourceFromPath(path: string): string {
-  return isDesktopRuntime() ? convertFileSrc(path) : path;
+export async function authorizeMediaPath(mediaPath: string): Promise<AuthorizedMedia> {
+  return invoke<AuthorizedMedia>("authorize_media_path", { mediaPath });
 }
 
 export async function analyzeVideo(request: AnalysisRequest): Promise<AnalysisResult> {
   return invoke<AnalysisResult>("analyze_video", { request });
 }
 
+export async function prepareCompatiblePlayback(
+  mediaPath: string,
+  ffmpegPath?: string,
+): Promise<string> {
+  return invoke<string>("prepare_compatible_playback", { mediaPath, ffmpegPath });
+}
+
 export async function exportSubtitles(request: ExportSubtitlesRequest): Promise<string> {
   return invoke<string>("export_subtitles", { request });
 }
 
-export async function subscribeAnalysisProgress(
-  callback: (progress: AnalysisProgress) => void,
+export async function subscribeAnalysisSegments(
+  callback: (result: AnalysisSegments) => void,
 ): Promise<UnlistenFn> {
-  return listen<AnalysisProgress>("analysis-progress", (event) => callback(event.payload));
+  return listen<AnalysisSegments>("analysis-segments", (event) => callback(event.payload));
 }
