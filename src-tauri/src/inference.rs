@@ -21,6 +21,10 @@ const MAX_SUBTITLE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const MAX_TRANSLATION_PROMPT_BYTES: usize = 24 * 1024;
 const TRANSLATION_BATCH_SIZE: usize = 24;
+const ARGOS_FRAGMENT_MAX_GAP_MS: u64 = 1_200;
+const ARGOS_UNIT_MAX_DURATION_MS: u64 = 12_000;
+const ARGOS_UNIT_MAX_TEXT_BYTES: usize = 1_024;
+const ARGOS_UNIT_MAX_CUES: usize = 6;
 const FIRST_ANALYSIS_WINDOW_MS: u64 = 60 * 1_000;
 const ANALYSIS_WINDOW_MS: u64 = 5 * 60 * 1_000;
 const EXTRACT_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
@@ -117,14 +121,7 @@ where
         MAX_MODEL_BYTES,
     )?;
     let job = JobDirectory::create(cache_directory)?;
-    let duration_ms = request
-        .duration_ms
-        .filter(|duration| *duration > 0)
-        .ok_or_else(|| {
-            InferenceError(
-                "The video duration is unavailable; reopen the video and try again".to_owned(),
-            )
-        })?;
+    let duration_ms = require_duration_ms(request.duration_ms)?;
     let mut offset_ms = 0_u64;
     let mut window_index = 0_u64;
     let mut next_segment_id = 1_u32;
@@ -178,17 +175,24 @@ where
         )?;
         let source_cues = read_srt(&source_output.with_extension("srt"))?;
         if !source_cues.is_empty() {
+            let grouped_source_cues =
+                uses_argos_translation(&request).then(|| coalesce_argos_fragments(&source_cues));
+            let translation_cues = grouped_source_cues.as_deref().unwrap_or(&source_cues);
             progress("translating", fraction, "Translating new captions locally");
             let translated = translate(
                 &request,
                 &whisper,
                 &whisper_model,
                 &audio,
-                &source_cues,
+                translation_cues,
                 &window_directory,
             )?;
-            let window_segments =
-                offset_segments(&source_cues, translated, offset_ms, &mut next_segment_id);
+            let window_segments = offset_segments(
+                translation_cues,
+                translated,
+                offset_ms,
+                &mut next_segment_id,
+            );
             partial_result(&window_segments);
             segments.extend(window_segments);
         }
@@ -219,6 +223,14 @@ fn analysis_fraction(offset_ms: u64, duration_ms: u64) -> f64 {
         .checked_div(duration_ms)
         .unwrap_or_default();
     f64::from(u32::try_from(permille).expect("analysis progress is at most 1000")) / 1_000.0
+}
+
+fn require_duration_ms(duration_ms: Option<u64>) -> Result<u64> {
+    duration_ms.filter(|duration| *duration > 0).ok_or_else(|| {
+        InferenceError(
+            "The video duration is unavailable; reopen the video and try again".to_owned(),
+        )
+    })
 }
 
 fn offset_segments(
@@ -388,6 +400,105 @@ fn translate(
         &request.source_language,
         &request.target_language,
         job_directory,
+    )
+}
+
+fn uses_argos_translation(request: &AnalyzeVideoRequest) -> bool {
+    !language_matches(&request.source_language, &request.target_language)
+        && !is_english(&request.target_language)
+        && request
+            .argos_translate_path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty())
+}
+
+fn coalesce_argos_fragments(source_cues: &[Cue]) -> Vec<Cue> {
+    let mut units = Vec::new();
+    let mut current: Option<Cue> = None;
+    let mut current_cue_count = 0_usize;
+
+    for cue in source_cues {
+        let should_start_new_unit = current.as_ref().is_some_and(|unit| {
+            sentence_is_complete(&unit.text)
+                || cue.start_ms.saturating_sub(unit.end_ms) > ARGOS_FRAGMENT_MAX_GAP_MS
+                || cue.end_ms.saturating_sub(unit.start_ms) > ARGOS_UNIT_MAX_DURATION_MS
+                || joined_text_bytes(&unit.text, &cue.text) > ARGOS_UNIT_MAX_TEXT_BYTES
+                || current_cue_count >= ARGOS_UNIT_MAX_CUES
+                || starts_new_speaker(&cue.text)
+        });
+
+        if should_start_new_unit {
+            units.push(current.take().expect("a current unit was checked"));
+            current_cue_count = 0;
+        }
+
+        if let Some(unit) = &mut current {
+            append_fragment(&mut unit.text, &cue.text);
+            unit.end_ms = unit.end_ms.max(cue.end_ms);
+            current_cue_count += 1;
+        } else {
+            current = Some(cue.clone());
+            current_cue_count = 1;
+        }
+    }
+
+    if let Some(unit) = current {
+        units.push(unit);
+    }
+    units
+}
+
+fn sentence_is_complete(text: &str) -> bool {
+    text.trim_end_matches([
+        '"', '\'', ')', ']', '}', '»', '”', '’', '」', '』', '】', '〉', '》',
+    ])
+    .ends_with(['.', '!', '?', '。', '！', '？', '…'])
+}
+
+fn starts_new_speaker(text: &str) -> bool {
+    let text = text.trim_start();
+    ["- ", "– ", "— ", ">>"]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
+fn joined_text_bytes(left: &str, right: &str) -> usize {
+    left.len()
+        .saturating_add(usize::from(needs_fragment_space(left, right)))
+        .saturating_add(right.trim().len())
+}
+
+fn append_fragment(text: &mut String, fragment: &str) {
+    let fragment = fragment.trim();
+    if needs_fragment_space(text, fragment) {
+        text.push(' ');
+    }
+    text.push_str(fragment);
+}
+
+fn needs_fragment_space(left: &str, right: &str) -> bool {
+    let Some(left) = left.trim_end().chars().next_back() else {
+        return false;
+    };
+    let Some(right) = right.trim_start().chars().next() else {
+        return false;
+    };
+    !is_cjk(left)
+        && !is_cjk(right)
+        && !matches!(
+            right,
+            '.' | ',' | '!' | '?' | ':' | ';' | ')' | ']' | '}' | '。' | '，' | '！' | '？'
+        )
+}
+
+fn is_cjk(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0x3040..=0x30FF
+            | 0xAC00..=0xD7AF
+            | 0xF900..=0xFAFF
     )
 }
 
@@ -1156,6 +1267,45 @@ mod tests {
     }
 
     #[test]
+    fn coalesces_argos_fragments_until_sentence_end() {
+        let cues = vec![
+            cue(0, 900, "We rowed"),
+            cue(950, 1_800, "down the river."),
+            cue(1_900, 2_700, "It was"),
+            cue(2_750, 3_500, "on the bank."),
+        ];
+
+        assert_eq!(
+            coalesce_argos_fragments(&cues),
+            vec![
+                cue(0, 1_800, "We rowed down the river."),
+                cue(1_900, 3_500, "It was on the bank."),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_cjk_joining_and_breaks_on_long_gaps() {
+        let cues = vec![
+            cue(0, 500, "今天"),
+            cue(550, 1_000, "下雨了。"),
+            cue(3_000, 3_500, "下一句"),
+        ];
+
+        assert_eq!(
+            coalesce_argos_fragments(&cues),
+            vec![cue(0, 1_000, "今天下雨了。"), cue(3_000, 3_500, "下一句")]
+        );
+    }
+
+    #[test]
+    fn does_not_merge_a_new_speaker_into_an_unfinished_line() {
+        let cues = vec![cue(0, 900, "I thought"), cue(950, 1_800, "— No, listen.")];
+
+        assert_eq!(coalesce_argos_fragments(&cues), cues);
+    }
+
+    #[test]
     fn offsets_incremental_segments_on_the_playback_clock() {
         let cues = vec![Cue {
             start_ms: 250,
@@ -1174,6 +1324,14 @@ mod tests {
             }]
         );
         assert_eq!(next_id, 8);
+    }
+
+    fn cue(start_ms: u64, end_ms: u64, text: &str) -> Cue {
+        Cue {
+            start_ms,
+            end_ms,
+            text: text.to_owned(),
+        }
     }
 
     #[test]

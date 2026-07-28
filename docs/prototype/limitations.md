@@ -30,6 +30,11 @@ The current vertical slice is designed to prove a local workflow, not broad comp
 ## Translation
 
 - Whisper's translation mode targets English only.
+- An available `argos-translate` process is preferred for Chinese, Japanese, and Korean targets.
+  Playdub joins nearby Whisper fragments into bounded sentence-like units before sending them to
+  Argos, so the displayed source and translation may span several original recognition cues.
+- Fragment joining uses punctuation, pauses, speaker markers, and safety limits. It does not infer
+  cross-sentence context and cannot always recover punctuation omitted by recognition.
 - Other target languages require optional `llama-cli` and an instruction-capable GGUF model.
 - Playdub does not validate that a locally configured GGUF model supports either requested language.
 - LLM output can be inaccurate or structurally inconsistent. It is not appropriate for safety-
