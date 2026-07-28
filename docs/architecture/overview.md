@@ -70,8 +70,15 @@ The current batch pipeline is:
 1. FFmpeg decodes the selected media into a private 16 kHz mono WAV working file.
 2. `whisper-cli` generates an SRT transcript with media timestamps.
 3. For an English target, a separate Whisper translation pass produces English captions.
-4. For another target language, optional `llama-cli` translates caption text with a user-selected
+4. For Chinese, Japanese, or Korean targets, an available `argos-translate` process translates
+   complete semantic units assembled from adjacent Whisper fragments.
+5. For another target language, optional `llama-cli` translates caption text with a user-selected
    instruction-capable GGUF model.
+
+Argos fragment assembly stops at sentence-ending punctuation, a speaker change, a long pause, or
+bounded duration, cue-count, and text-size limits. The resulting subtitle spans the first source
+fragment's start time through the last fragment's end time. This improves sentence completeness but
+does not provide cross-sentence translation context.
 
 The tools and models are never downloaded or bundled by Playdub. Process arguments are passed
 without a shell, executables resolve only from the application's startup `PATH`, the Whisper model
